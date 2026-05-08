@@ -103,6 +103,12 @@ async def _scan_pass(
     if only_market_ids:
         markets = [m for m in markets if m.id in only_market_ids]
 
+    # Persist markets BEFORE the discovery pipeline. The pipeline writes
+    # Signals with market_id foreign keys; without these rows the inserts
+    # crash with `FOREIGN KEY constraint failed`.
+    for m in markets:
+        upsert_market(m)
+
     # Run discovery (RSS → score → link → persist)
     by_market: dict[str, list[EvidenceRow]] = {}
     if use_news:
@@ -118,7 +124,7 @@ async def _scan_pass(
     for m in markets:
         if not m.yes_token_id or m.closed:
             continue
-        upsert_market(m)
+        # Market was upserted above before discover; no need to re-upsert.
         # Snapshot (P0.2) — book + depth + raw, persisted for backtest fuel.
         try:
             snap = snapshot_market(clob, m.id, m.yes_token_id)

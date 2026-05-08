@@ -28,7 +28,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 8         # well under the 10-minute cron interval
+    timeout-minutes: 25         # well above the worst-case scan + install time
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,4 +48,6 @@ jobs:
           FUNDER: ${{ secrets.FUNDER }}
           DRY_RUN: "true"
           MAX_NOTIONAL_PER_DAY: "25"
-        run: python -m polyclaude.main scan --limit 50
+        # 25 markets ≈ 3–4 min at ~6s per Claude call × 2 calls per market.
+        # Cron runs every 10 min so each scan has room to finish.
+        run: python -m polyclaude.main scan --limit 25
