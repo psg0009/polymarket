@@ -346,9 +346,59 @@ _LIBSQL_LOCAL_PATH = os.environ.get("LIBSQL_LOCAL_PATH", "data/polyclaude.libsql
 _libsql_remote: tuple[str, str] | None = None
 
 
+class _LibsqlConnectionProxy:
+    """Adapts libsql_experimental.Connection to the sqlite3 DBAPI surface
+    that SQLAlchemy's pysqlite dialect expects.
+
+    Forwards every attribute lookup to the wrapped connection. No-ops the
+    methods that libsql's Rust-backed Connection doesn't expose but that
+    SQLAlchemy registers at connect time (create_function for REGEXP, etc.).
+    Since we don't use REGEXP / user-defined SQL functions anywhere, the
+    no-ops are safe.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner) -> None:  # type: ignore[no-untyped-def]
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name: str, value) -> None:  # type: ignore[no-untyped-def]
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._inner, name, value)
+
+    # SQLAlchemy SQLite dialect calls these at connect time:
+    def create_function(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def create_aggregate(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def create_collation(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def set_authorizer(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def set_progress_handler(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def set_trace_callback(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    # Some pool code probes for `in_transaction`; libsql may not expose it.
+    @property
+    def in_transaction(self) -> bool:
+        return getattr(self._inner, "in_transaction", False)
+
+
 def _libsql_connect():  # type: ignore[no-untyped-def]
     """SQLAlchemy `creator` callable that returns a libsql_experimental
-    connection in embedded-replica mode.
+    connection (wrapped) in embedded-replica mode.
 
     The replica syncs from Turso on connect (so reads see fresh data) and is
     written to locally; sync_database_replica() pushes pending writes back.
@@ -366,7 +416,7 @@ def _libsql_connect():  # type: ignore[no-untyped-def]
         # First-time connect against an empty Turso DB has nothing to pull;
         # we'll still be able to write and the next sync will push schema.
         pass
-    return conn
+    return _LibsqlConnectionProxy(conn)
 
 
 def sync_database_replica() -> None:
