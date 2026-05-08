@@ -4,12 +4,12 @@ from polyclaude.ledger.db import (
     Base, BookSnapshot, CalibrationPoint, Decision, DecisionAction,
     Event, Fill, Modality, OracleCall, Order, OrderStatus, OrderType,
     PnLSnapshot, RiskState, Side, Signal, Market, get_engine, get_session,
-    init_db,
+    init_db, sync_database_replica,
 )
 
 __all__ = [
     "Base", "BookSnapshot", "CalibrationPoint", "Decision", "DecisionAction",
     "Event", "Fill", "Modality", "OracleCall", "Order", "OrderStatus", "OrderType",
     "PnLSnapshot", "RiskState", "Side", "Signal", "Market", "get_engine", "get_session",
-    "init_db",
+    "init_db", "sync_database_replica",
 ]

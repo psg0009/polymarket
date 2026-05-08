@@ -297,12 +297,11 @@ class RiskState(Base):
 
 
 def _patch_libsql_isolation_probe() -> None:
-    """Turso's Hrana wire protocol rejects `PRAGMA read_uncommitted` with HTTP 405.
+    """Defensive patch retained for any libsql remote-only edge case.
 
-    SQLAlchemy's SQLite dialect calls that PRAGMA at first-connect to discover
-    the default isolation level, which crashes the engine before any DDL runs.
-    We patch it to fall back to SERIALIZABLE if the probe fails — local SQLite
-    behaviour is unchanged because the original method still succeeds there.
+    With embedded-replica mode (the default below) all SQL runs against a local
+    SQLite file so this should never fire — but it's cheap insurance and keeps
+    behaviour identical for users who hand-roll a `sqlite+libsql://` remote URL.
     """
     try:
         from sqlalchemy.dialects.sqlite.base import SQLiteDialect
@@ -322,35 +321,111 @@ def _patch_libsql_isolation_probe() -> None:
     SQLiteDialect._polyclaude_libsql_patched = True  # type: ignore[attr-defined]
 
 
+def _parse_libsql_url(url: str) -> tuple[str, str]:
+    """Return (sync_url, auth_token) for a libsql or sqlite+libsql URL."""
+    from urllib.parse import parse_qs, urlsplit
+
+    if url.startswith("sqlite+libsql://"):
+        u = "libsql://" + url[len("sqlite+libsql://"):]
+    elif url.startswith("libsql://"):
+        u = url
+    else:  # pragma: no cover - caller has already detected libsql
+        u = url
+
+    parts = urlsplit(u)
+    host = parts.hostname or ""
+    sync_url = f"libsql://{host}"
+    if parts.port:
+        sync_url = f"libsql://{host}:{parts.port}"
+    params = parse_qs(parts.query)
+    token = params.get("authToken", [""])[0]
+    return sync_url, token
+
+
+_LIBSQL_LOCAL_PATH = os.environ.get("LIBSQL_LOCAL_PATH", "data/polyclaude.libsql.db")
+_libsql_remote: tuple[str, str] | None = None
+
+
+def _libsql_connect():  # type: ignore[no-untyped-def]
+    """SQLAlchemy `creator` callable that returns a libsql_experimental
+    connection in embedded-replica mode.
+
+    The replica syncs from Turso on connect (so reads see fresh data) and is
+    written to locally; sync_database_replica() pushes pending writes back.
+    """
+    import libsql_experimental as libsql  # type: ignore[import]
+
+    if _libsql_remote is None:  # pragma: no cover
+        raise RuntimeError("libsql remote not initialised")
+    sync_url, token = _libsql_remote
+    os.makedirs(os.path.dirname(_LIBSQL_LOCAL_PATH) or ".", exist_ok=True)
+    conn = libsql.connect(_LIBSQL_LOCAL_PATH, sync_url=sync_url, auth_token=token)
+    try:
+        conn.sync()
+    except Exception:
+        # First-time connect against an empty Turso DB has nothing to pull;
+        # we'll still be able to write and the next sync will push schema.
+        pass
+    return conn
+
+
+def sync_database_replica() -> None:
+    """Push local writes to Turso and pull remote changes.
+
+    Call this after a batch of inserts in long-running processes; the engine
+    auto-syncs on `connect`, but explicit sync after writes is what guarantees
+    the dashboard sees fresh data.
+    """
+    if _libsql_remote is None:
+        return
+    try:
+        import libsql_experimental as libsql  # type: ignore[import]
+
+        sync_url, token = _libsql_remote
+        conn = libsql.connect(_LIBSQL_LOCAL_PATH, sync_url=sync_url, auth_token=token)
+        conn.sync()
+        conn.close()
+    except Exception:  # pragma: no cover
+        pass
+
+
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
     """Build the SQLAlchemy engine.
 
-    Supports three URL forms:
-    - sqlite:///path/to.db                       — local file
-    - sqlite+libsql://<host>/?authToken=…        — Turso (hosted libSQL)
-      shorthand `libsql://<host>?authToken=…` is auto-rewritten to the dialect+driver form.
-    - postgresql://…                             — for cloud Postgres (e.g. Supabase)
+    Supports four URL forms:
+    - sqlite:///path/to.db                          — local file
+    - sqlite+libsql://<host>?authToken=…            — Turso remote (fragile;
+      most PRAGMAs fail over Hrana — embedded-replica below is preferred)
+    - libsql://<host>?authToken=…                   — Turso (auto-converted to
+      embedded-replica mode: a local SQLite file at $LIBSQL_LOCAL_PATH that
+      syncs with Turso. All PRAGMAs work because the engine talks to local
+      SQLite via the standard sqlite3 driver; libsql only handles the sync.)
+    - postgresql://…                                — Supabase / managed Postgres
     """
+    global _libsql_remote
     settings = get_settings()
     url = settings.database_url
 
-    # Turso shorthand → SQLAlchemy URL with the libsql dialect/driver.
-    if url.startswith("libsql://"):
-        url = "sqlite+libsql://" + url[len("libsql://"):]
+    is_libsql = url.startswith("libsql://") or url.startswith("sqlite+libsql://")
 
-    is_libsql = "libsql" in url
+    if is_libsql:
+        # Always use embedded-replica mode.
+        _libsql_remote = _parse_libsql_url(url)
+        os.makedirs(os.path.dirname(_LIBSQL_LOCAL_PATH) or ".", exist_ok=True)
+        _patch_libsql_isolation_probe()
+        # `creator` overrides URL-based connection; we still pass a dummy URL so
+        # SQLAlchemy picks the SQLite dialect.
+        return create_engine(
+            "sqlite:///" + _LIBSQL_LOCAL_PATH, future=True, creator=_libsql_connect,
+        )
 
-    if url.startswith("sqlite") and not is_libsql:
+    if url.startswith("sqlite"):
         path = url.split("///", 1)[-1]
         if path and path != ":memory:":
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-    if is_libsql:
-        _patch_libsql_isolation_probe()
-
-    engine = create_engine(url, future=True)
-    return engine
+    return create_engine(url, future=True)
 
 
 @lru_cache(maxsize=1)

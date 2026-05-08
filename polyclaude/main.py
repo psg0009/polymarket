@@ -29,7 +29,7 @@ from polyclaude.clob.allowances import preflight
 from polyclaude.clob.client import ClobWrapper
 from polyclaude.clob.executor import Executor, PlaceRequest
 from polyclaude.config import get_settings
-from polyclaude.ledger.db import init_db
+from polyclaude.ledger.db import init_db, sync_database_replica
 from polyclaude.ledger.persist import (
     get_or_create_risk_state, increment_daily_used, save_decision,
     save_oracle_calls, save_order, save_snapshot, upsert_market,
@@ -196,6 +196,8 @@ async def _scan_pass(
     if print_table:
         console.print(table)
         console.print(f"[dim]daily notional used: ${float(daily_used):.2f}[/dim]")
+    # Push all writes from this pass back to Turso.
+    sync_database_replica()
     return by_market
 
 
@@ -429,6 +431,7 @@ def cmd_reconcile() -> None:
     inserted = reconcile_fills(clob)
     created = fill_calibration_points()
     summary = daily_brier_summary()
+    sync_database_replica()
     console.print(f"[green]fills inserted={inserted} calibration points created={created}[/green]")
     console.print(summary)
 
