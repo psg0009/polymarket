@@ -1,15 +1,16 @@
 """Streamlit dashboard.
 
-Reads the ledger DB defined by:
-- `st.secrets["DATABASE_URL"]` (Streamlit Cloud), or
-- `DATABASE_URL` env var (local), or
-- the default `.env` value.
+Reads from a Turso database directly via Turso's HTTP API. This avoids
+depending on the Rust-built `libsql-experimental` package, which has no
+prebuilt wheel for Streamlit Cloud's Python 3.14 environment and can't be
+compiled there either (no cmake).
 
-Run locally:    streamlit run polyclaude/ui/dashboard.py
-Run hosted:     deploy via https://share.streamlit.io against this repo.
+DATABASE_URL is read from:
+1. `st.secrets["DATABASE_URL"]` (Streamlit Cloud)
+2. `DATABASE_URL` env var (local)
 
-Dashboard is intentionally read-only. The agent (running locally or as a
-worker) is what writes oracle calls and decisions; this UI only renders them.
+The dashboard is read-only by design. The agent (running in GitHub Actions
+or locally) is what writes Decisions / Orders / OracleCalls / etc.
 """
 
 from __future__ import annotations
@@ -18,13 +19,13 @@ import os
 
 
 def _wire_secrets() -> None:
-    """Bridge Streamlit secrets → env vars before any polyclaude imports."""
+    """Bridge Streamlit secrets → env vars before any other import that reads them."""
     try:
         import streamlit as st  # noqa
     except ImportError:  # pragma: no cover
         return
     try:
-        for k in ("DATABASE_URL", "ANTHROPIC_API_KEY"):
+        for k in ("DATABASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_DAILY_USD_BUDGET"):
             if k in st.secrets and not os.getenv(k):
                 os.environ[k] = str(st.secrets[k])
     except Exception:
@@ -34,36 +35,86 @@ def _wire_secrets() -> None:
 _wire_secrets()
 
 
+# --- Anthropic pricing (mirror of polyclaude.oracle.claude._PRICING_USD_PER_MTOK) ---
+# Replicated here so the dashboard can compute today's spend without importing
+# the agent module (which transitively pulls in the anthropic SDK we don't need).
+_PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-4-7": (15.0, 75.0),
+    "claude-opus-4-6": (15.0, 75.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
+}
+_DEFAULT_PRICE = (15.0, 75.0)
+
+
+def _cost_for(model: str | None, in_tok: int | None, out_tok: int | None) -> float:
+    in_price, out_price = _PRICING.get(model or "", _DEFAULT_PRICE)
+    return (in_tok or 0) * in_price / 1e6 + (out_tok or 0) * out_price / 1e6
+
+
 def main() -> None:  # pragma: no cover - UI entry
     import pandas as pd
     import streamlit as st
-    from sqlalchemy import select
 
-    from polyclaude.ledger.db import (
-        CalibrationPoint, Decision, Order, OrderStatus, get_session,
-    )
+    from polyclaude.ui.turso_http import from_env, query_dicts
 
     st.set_page_config(page_title="polyclaude", layout="wide")
     st.title("polyclaude — ledger")
-    st.caption(f"DATABASE_URL = {os.getenv('DATABASE_URL', '(default)')[:80]}")
 
-    with get_session() as session:
-        decisions = pd.read_sql(select(Decision).order_by(Decision.ts.desc()).limit(500), session.bind)
-        orders = pd.read_sql(select(Order).order_by(Order.placed_at.desc()).limit(500), session.bind)
-        calib = pd.read_sql(select(CalibrationPoint), session.bind)
+    db_url = os.getenv("DATABASE_URL", "")
+    st.caption(f"DATABASE_URL = {db_url[:80] + ('…' if len(db_url) > 80 else '')}")
 
-    from polyclaude.config import get_settings
-    from polyclaude.oracle.claude import _today_spend_usd
+    endpoint = from_env()
+    if endpoint is None:
+        st.error(
+            "DATABASE_URL not set or not a libsql:// URL. Configure it in "
+            "Streamlit Cloud → app settings → Secrets, e.g. "
+            "`DATABASE_URL = \"libsql://your-db.turso.io?authToken=…\"`."
+        )
+        st.stop()
 
-    spend_today = _today_spend_usd()
-    budget = float(get_settings().anthropic_daily_usd_budget)
+    try:
+        decisions = pd.DataFrame(query_dicts(
+            endpoint,
+            "SELECT id, market_id, strategy, committed_p, market_p_at_decision, "
+            "edge_bps, side, intended_size_usd, action, skip_reason, ts "
+            "FROM decisions ORDER BY ts DESC LIMIT 500",
+        ))
+        orders = pd.DataFrame(query_dicts(
+            endpoint,
+            "SELECT id, decision_id, market_id, side, order_type, price, "
+            "size_shares, notional_usd, status, placed_at "
+            "FROM orders ORDER BY placed_at DESC LIMIT 500",
+        ))
+        calib = pd.DataFrame(query_dicts(
+            endpoint,
+            "SELECT decision_id, market_id, strategy, p_predicted, confidence, "
+            "outcome_yes, brier, log_loss, resolved_at FROM calibration_points",
+        ))
+        oracle_today = pd.DataFrame(query_dicts(
+            endpoint,
+            "SELECT model, input_tokens, output_tokens "
+            "FROM oracle_calls "
+            "WHERE ts >= datetime('now', 'start of day')",
+        ))
+    except Exception as e:
+        st.error(f"Could not fetch data from Turso: {e}")
+        st.stop()
+
+    spend_today = 0.0
+    if len(oracle_today):
+        for _, row in oracle_today.iterrows():
+            spend_today += _cost_for(row.get("model"), row.get("input_tokens"), row.get("output_tokens"))
+    budget = float(os.getenv("ANTHROPIC_DAILY_USD_BUDGET", "50"))
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Decisions", len(decisions))
     col2.metric("Orders", len(orders))
     col3.metric(
         "Filled",
-        int((orders["status"] == OrderStatus.filled.value).sum()) if len(orders) else 0,
+        int((orders["status"] == "filled").sum()) if len(orders) else 0,
     )
     if len(calib):
         col4.metric("Brier", f"{calib['brier'].mean():.3f}", help=f"n={len(calib)}")
@@ -94,7 +145,7 @@ def main() -> None:  # pragma: no cover - UI entry
             st.dataframe(chart, use_container_width=True)
             st.line_chart(chart[["mean_p", "yes_rate"]])
         else:
-            st.info("No resolved markets yet — run `polyclaude reconcile` after markets settle.")
+            st.info("No resolved markets yet — `polyclaude reconcile` populates this once markets settle.")
     with tabs[3]:
         gate_brier = float(calib["brier"].mean()) if len(calib) else float("nan")
         n = len(calib)

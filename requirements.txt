@@ -1,20 +1,13 @@
-# Streamlit Community Cloud reads this file to install dependencies.
-# We keep the dashboard's deps minimal — no torch/transformers/whisper here,
-# the worker process is responsible for writing to the ledger.
-py-clob-client>=0.17
-anthropic>=0.40
+# Streamlit Cloud's `requirements.txt`. Deliberately minimal so it works on
+# Python 3.14 without compiling Rust + cmake. The dashboard talks to Turso
+# directly via the HTTP API (`polyclaude/ui/turso_http.py`), so no
+# sqlalchemy-libsql / libsql-experimental needed here.
+#
+# The agent (which DOES need the full stack) installs from
+# `requirements-agent.txt` in the GitHub Actions workflows.
+
 httpx>=0.27
 pydantic>=2.7
-pydantic-settings>=2.3
-sqlalchemy>=2.0
-sqlalchemy-libsql>=0.1; python_version >= "3.11"
-tenacity>=8.4
-python-dotenv>=1.0
-feedparser>=6.0
-structlog>=24.1
-vaderSentiment>=3.3
-rich>=13.7
-click>=8.1
 streamlit>=1.36
 pandas>=2.2
 matplotlib>=3.9

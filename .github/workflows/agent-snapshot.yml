@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-agent.txt
       - name: Snapshot only (no-news, no-oracle)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
