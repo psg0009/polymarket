@@ -296,6 +296,32 @@ class RiskState(Base):
 # --- engine / session helpers --------------------------------------------
 
 
+def _patch_libsql_isolation_probe() -> None:
+    """Turso's Hrana wire protocol rejects `PRAGMA read_uncommitted` with HTTP 405.
+
+    SQLAlchemy's SQLite dialect calls that PRAGMA at first-connect to discover
+    the default isolation level, which crashes the engine before any DDL runs.
+    We patch it to fall back to SERIALIZABLE if the probe fails — local SQLite
+    behaviour is unchanged because the original method still succeeds there.
+    """
+    try:
+        from sqlalchemy.dialects.sqlite.base import SQLiteDialect
+    except ImportError:  # pragma: no cover
+        return
+    if getattr(SQLiteDialect, "_polyclaude_libsql_patched", False):
+        return
+    original = SQLiteDialect.get_isolation_level
+
+    def safe_get_isolation_level(self, dbapi_connection):  # type: ignore[no-untyped-def]
+        try:
+            return original(self, dbapi_connection)
+        except Exception:
+            return "SERIALIZABLE"
+
+    SQLiteDialect.get_isolation_level = safe_get_isolation_level  # type: ignore[assignment]
+    SQLiteDialect._polyclaude_libsql_patched = True  # type: ignore[attr-defined]
+
+
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
     """Build the SQLAlchemy engine.
@@ -313,10 +339,15 @@ def get_engine() -> Engine:
     if url.startswith("libsql://"):
         url = "sqlite+libsql://" + url[len("libsql://"):]
 
-    if url.startswith("sqlite") and "libsql" not in url:
+    is_libsql = "libsql" in url
+
+    if url.startswith("sqlite") and not is_libsql:
         path = url.split("///", 1)[-1]
         if path and path != ":memory:":
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    if is_libsql:
+        _patch_libsql_isolation_probe()
 
     engine = create_engine(url, future=True)
     return engine
