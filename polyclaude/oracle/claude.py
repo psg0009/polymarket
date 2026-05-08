@@ -13,6 +13,7 @@ import json
 import re
 import time
 import uuid
+from datetime import datetime, timedelta, timezone  # noqa: F401  (used in cache helper)
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -177,8 +178,35 @@ class ClaudeOracle:
         self,
         market: dict,
         decision_group_id: str | None = None,
+        cache_hours: float = 24.0,
     ) -> tuple[AmbiguityResponse | None, CallTrace]:
+        """Run the ambiguity pre-pass, with a 24-hour ledger-backed cache.
+
+        If we already evaluated this market's ambiguity recently and the
+        verdict was `clear` with clarity ≥ min_clarity, reuse that result
+        instead of paying for another Claude call. We don't cache `ambiguous`
+        / `hostile` verdicts because re-evaluating those is cheap insurance.
+        """
         gid = decision_group_id or str(uuid.uuid4())
+
+        cached = self._ambiguity_from_cache(market.get("id", ""), cache_hours)
+        if cached is not None:
+            trace = CallTrace(
+                decision_group_id=gid,
+                call_type="ambiguity",
+                model="cache",
+                prompt_system="(cached)",
+                prompt_user="(cached)",
+                raw_response=json.dumps(cached.model_dump()),
+                parsed=cached.model_dump(),
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=0,
+                error=None,
+            )
+            log.info("oracle.ambiguity_cache_hit", market=market.get("id", "")[:12])
+            return cached, trace
+
         user = P.ambiguity_user(market)
         for attempt in range(2):
             _, parsed, trace = self._call(
@@ -190,6 +218,41 @@ class ClaudeOracle:
             except ValidationError as e:
                 log.warning("oracle.ambiguity_parse_fail", attempt=attempt, err=str(e))
         return None, trace
+
+    @staticmethod
+    def _ambiguity_from_cache(market_id: str, hours: float) -> AmbiguityResponse | None:
+        """Look in OracleCall history for a recent `clear` ambiguity verdict."""
+        if not market_id:
+            return None
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            from sqlalchemy import desc, select
+
+            from polyclaude.ledger.db import OracleCall, get_session
+
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+            with get_session() as session:
+                row = session.execute(
+                    select(OracleCall.parsed_response, OracleCall.clarity)
+                    .where(
+                        OracleCall.market_id == market_id,
+                        OracleCall.call_type == "ambiguity",
+                        OracleCall.ts >= cutoff,
+                    )
+                    .order_by(desc(OracleCall.ts))
+                    .limit(1)
+                ).first()
+            if row is None:
+                return None
+            parsed, clarity = row
+            if not parsed or (clarity or 0) < 0.7:
+                return None
+            if (parsed.get("verdict") or "").lower() != "clear":
+                return None
+            return AmbiguityResponse.model_validate(parsed)
+        except Exception:
+            return None
 
     def evaluate_probability(
         self,

@@ -1,7 +1,7 @@
 interactions:
 - request:
     method: GET
-    uri: https://gamma-api.polymarket.com/markets?limit=2&closed=false&order=volume&ascending=false&offset=0&active=true
+    uri: https://gamma-api.polymarket.com/markets?limit=5&closed=false&order=volume&ascending=false&offset=0&active=true
     headers: {}
     body: null
   response:
@@ -18,7 +18,7 @@ interactions:
             "id": "0x_test_market_001",
             "conditionId": "cid001",
             "question": "Will the test pass?",
-            "description": "A synthetic Gamma fixture for VCR replay.",
+            "description": "A synthetic Gamma fixture mirroring the real schema. Used by VCR replay tests.",
             "resolution_rules": "Resolves YES if the test asserts and exits 0.",
             "resolutionSource": "github actions",
             "category": "crypto",
@@ -37,7 +37,7 @@ interactions:
             "id": "0x_test_market_002",
             "conditionId": "cid002",
             "question": "Will Modi visit Mumbai in May?",
-            "description": "Indian-context fixture.",
+            "description": "Indian-context fixture; verifies the india tagger and election routing.",
             "resolution_rules": "Resolves YES on official PIB or ECI announcement.",
             "resolutionSource": "pib.gov.in",
             "category": "politics",
@@ -51,5 +51,58 @@ interactions:
               {"outcome": "Yes", "token_id": "tok_yes_002", "price": 0.71},
               {"outcome": "No",  "token_id": "tok_no_002",  "price": 0.29}
             ]
+          },
+          {
+            "id": "0x_test_resolved_yes",
+            "conditionId": "cid003",
+            "question": "Did the resolved-YES market settle?",
+            "description": "Closed market in winner-flag form (tokens[].winner==true). Exercises _extract_outcome path A.",
+            "resolution_rules": "n/a",
+            "category": "test",
+            "tags": [],
+            "volume": 1000,
+            "liquidity": 0,
+            "closed": true,
+            "active": false,
+            "endDate": "2025-01-01T00:00:00Z",
+            "tokens": [
+              {"outcome": "Yes", "token_id": "tok_yes_003", "winner": true,  "price": 1.0},
+              {"outcome": "No",  "token_id": "tok_no_003",  "winner": false, "price": 0.0}
+            ]
+          },
+          {
+            "id": "0x_test_resolved_price",
+            "conditionId": "cid004",
+            "question": "Did the price-only market settle?",
+            "description": "Closed market with price=1 but no winner flag. Exercises _extract_outcome path B.",
+            "resolution_rules": "n/a",
+            "category": "test",
+            "tags": [],
+            "volume": 1000,
+            "liquidity": 0,
+            "closed": true,
+            "active": false,
+            "endDate": "2025-01-01T00:00:00Z",
+            "tokens": [
+              {"outcome": "Yes", "token_id": "tok_yes_004", "price": "1"},
+              {"outcome": "No",  "token_id": "tok_no_004",  "price": "0"}
+            ]
+          },
+          {
+            "id": "0x_test_jsonstr_outcomes",
+            "conditionId": "cid005",
+            "question": "JSON-string-encoded outcome arrays?",
+            "description": "Some Gamma responses encode outcomes/outcomePrices as JSON strings rather than arrays. Exercises _extract_outcome path C.",
+            "resolution_rules": "n/a",
+            "category": "test",
+            "tags": [],
+            "volume": 0,
+            "liquidity": 0,
+            "closed": true,
+            "active": false,
+            "endDate": "2025-01-01T00:00:00Z",
+            "outcomes": "[\"Yes\", \"No\"]",
+            "outcomePrices": "[\"1\", \"0\"]",
+            "clobTokenIds": "[\"tok_yes_005\", \"tok_no_005\"]"
           }
         ]

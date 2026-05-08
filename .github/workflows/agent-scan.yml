@@ -17,9 +17,14 @@ name: agent-scan
 # Brier ≤ 0.20 over ≥ 100 resolved markets.
 
 on:
+  # Hourly. With --limit 6 and the ambiguity cache we stay under
+  # 150 Claude calls/day in steady state:
+  #   day-1 worst case: 6 markets × 2 calls × 24 hours = 288 (cold cache)
+  #   steady state: 6 markets × 1 call (probability only, ambiguity cached)
+  #                  × 24 hours = 144
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes; GitHub minimum is */5
-  workflow_dispatch: {}        # manual trigger button in the Actions UI
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
 
 concurrency:
   group: agent-scan
@@ -48,6 +53,7 @@ jobs:
           FUNDER: ${{ secrets.FUNDER }}
           DRY_RUN: "true"
           MAX_NOTIONAL_PER_DAY: "25"
-        # 25 markets ≈ 3–4 min at ~6s per Claude call × 2 calls per market.
-        # Cron runs every 10 min so each scan has room to finish.
-        run: python -m polyclaude.main scan --limit 25
+        # 6 markets × ≤2 Claude calls each ≈ 1–2 min in steady state.
+        # The ambiguity cache (24 h) makes most calls into single-call scans
+        # after the first run, keeping daily total ≤150.
+        run: python -m polyclaude.main scan --limit 6

@@ -1,0 +1,122 @@
+interactions:
+- request:
+    body: ''
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Host:
+      - gamma-api.polymarket.com
+      User-Agent:
+      - python-httpx/0.28.1
+    method: GET
+    uri: https://gamma-api.polymarket.com/markets?limit=3&closed=false&order=volume&ascending=false&offset=0&active=true
+  response:
+    body:
+      string: Host not in allowlist
+    headers:
+      content-length:
+      - '21'
+      content-type:
+      - text/plain
+      date:
+      - Fri, 08 May 2026 10:33:42 GMT
+      x-deny-reason:
+      - host_not_allowed
+    status:
+      code: 403
+      message: Forbidden
+- request:
+    body: ''
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Host:
+      - gamma-api.polymarket.com
+      User-Agent:
+      - python-httpx/0.28.1
+    method: GET
+    uri: https://gamma-api.polymarket.com/markets?limit=3&closed=false&order=volume&ascending=false&offset=0&active=true
+  response:
+    body:
+      string: Host not in allowlist
+    headers:
+      content-length:
+      - '21'
+      content-type:
+      - text/plain
+      date:
+      - Fri, 08 May 2026 10:33:43 GMT
+      x-deny-reason:
+      - host_not_allowed
+    status:
+      code: 403
+      message: Forbidden
+- request:
+    body: ''
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Host:
+      - gamma-api.polymarket.com
+      User-Agent:
+      - python-httpx/0.28.1
+    method: GET
+    uri: https://gamma-api.polymarket.com/markets?limit=3&closed=false&order=volume&ascending=false&offset=0&active=true
+  response:
+    body:
+      string: Host not in allowlist
+    headers:
+      content-length:
+      - '21'
+      content-type:
+      - text/plain
+      date:
+      - Fri, 08 May 2026 10:33:45 GMT
+      x-deny-reason:
+      - host_not_allowed
+    status:
+      code: 403
+      message: Forbidden
+- request:
+    body: ''
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Host:
+      - gamma-api.polymarket.com
+      User-Agent:
+      - python-httpx/0.28.1
+    method: GET
+    uri: https://gamma-api.polymarket.com/markets?limit=3&closed=false&order=volume&ascending=false&offset=0&active=true
+  response:
+    body:
+      string: Host not in allowlist
+    headers:
+      content-length:
+      - '21'
+      content-type:
+      - text/plain
+      date:
+      - Fri, 08 May 2026 10:33:49 GMT
+      x-deny-reason:
+      - host_not_allowed
+    status:
+      code: 403
+      message: Forbidden
+version: 1
