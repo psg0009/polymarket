@@ -16,6 +16,16 @@ or locally) is what writes Decisions / Orders / OracleCalls / etc.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+# Streamlit Cloud runs `streamlit run polyclaude/ui/dashboard.py` from the
+# repo root but does NOT add that root to sys.path automatically, so the
+# `from polyclaude.ui.turso_http import ...` line below fails with
+# ModuleNotFoundError. Prepend the project root explicitly.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _wire_secrets() -> None:
