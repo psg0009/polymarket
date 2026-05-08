@@ -43,5 +43,5 @@ models_cache/
 htmlcov/
 coverage.xml
 
-# Streamlit
-.streamlit/
+# Streamlit — keep config.toml and the example, but never commit real secrets.
+.streamlit/secrets.toml

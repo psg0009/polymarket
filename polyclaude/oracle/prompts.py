@@ -212,13 +212,28 @@ def hint_for(category: str | None, tags: list[str] | None) -> str | None:
     return None
 
 
+_TIER_LABEL = {
+    1: "OFFICIAL",
+    2: "WIRE",
+    3: "NATIONAL",
+    4: "REGIONAL",
+    5: "SOCIAL",
+}
+
+
 def _format_evidence(evidence: list[dict]) -> str:
     if not evidence:
-        return "(no evidence available)"
+        return "(no evidence available; reason in your rationale should explicitly note this)"
     lines = []
     for i, e in enumerate(evidence[:30]):
+        tier = e.get("tier")
+        tier_str = (
+            f"tier={tier}/{_TIER_LABEL.get(int(tier), '?')}"
+            if isinstance(tier, (int, float))
+            else "tier=?"
+        )
         lines.append(
-            f"[{i}] {e.get('ts', '?')} | {e.get('source', '?')} | "
+            f"[{i}] {e.get('ts', '?')} | {e.get('source', '?')} | {tier_str} | "
             f"finbert={float(e.get('finbert', 0)):+.2f} vader={float(e.get('vader', 0)):+.2f} "
             f"| {(e.get('text', '') or '')[:280]}"
         )

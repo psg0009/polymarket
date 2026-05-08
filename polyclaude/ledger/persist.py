@@ -18,6 +18,7 @@ from polyclaude.ledger.db import (
     Decision, Event, Market, OracleCall, Order, OrderStatus, OrderType,
     RiskState, Side, get_session,
 )
+from polyclaude.ledger.db import BookSnapshot
 from polyclaude.markets.gamma import MarketSummary
 from polyclaude.markets.india import is_india_market
 from polyclaude.oracle.claude import CallTrace
@@ -49,6 +50,14 @@ def upsert_market(m: MarketSummary) -> None:
             existing.is_india = is_india_market(m)
             existing.resolves_at = m.end_date or existing.resolves_at
             existing.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+
+def save_snapshot(snap: BookSnapshot | None) -> None:
+    if snap is None:
+        return
+    with get_session() as session:
+        session.add(snap)
         session.commit()
 
 

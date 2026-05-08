@@ -1,0 +1,55 @@
+interactions:
+- request:
+    method: GET
+    uri: https://gamma-api.polymarket.com/markets?limit=2&closed=false&order=volume&ascending=false&offset=0&active=true
+    headers: {}
+    body: null
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      Content-Type:
+        - application/json
+    body:
+      string: |
+        [
+          {
+            "id": "0x_test_market_001",
+            "conditionId": "cid001",
+            "question": "Will the test pass?",
+            "description": "A synthetic Gamma fixture for VCR replay.",
+            "resolution_rules": "Resolves YES if the test asserts and exits 0.",
+            "resolutionSource": "github actions",
+            "category": "crypto",
+            "tags": ["test", "synthetic"],
+            "volume": 12345.6,
+            "liquidity": 678.9,
+            "closed": false,
+            "active": true,
+            "endDate": "2026-12-31T23:59:59Z",
+            "tokens": [
+              {"outcome": "Yes", "token_id": "tok_yes_001", "price": 0.42},
+              {"outcome": "No",  "token_id": "tok_no_001",  "price": 0.58}
+            ]
+          },
+          {
+            "id": "0x_test_market_002",
+            "conditionId": "cid002",
+            "question": "Will Modi visit Mumbai in May?",
+            "description": "Indian-context fixture.",
+            "resolution_rules": "Resolves YES on official PIB or ECI announcement.",
+            "resolutionSource": "pib.gov.in",
+            "category": "politics",
+            "tags": ["india", "elections"],
+            "volume": 50000.0,
+            "liquidity": 1500.0,
+            "closed": false,
+            "active": true,
+            "endDate": "2026-05-30T23:59:59Z",
+            "tokens": [
+              {"outcome": "Yes", "token_id": "tok_yes_002", "price": 0.71},
+              {"outcome": "No",  "token_id": "tok_no_002",  "price": 0.29}
+            ]
+          }
+        ]

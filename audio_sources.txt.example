@@ -1,0 +1,15 @@
+# Audio source feed list. One URL per line. Comments start with #.
+# Format:
+#   <feed_url>  # tier=N india=true|false
+#
+# Tip: tier comes from polyclaude/ingest/normalizer.py SOURCE_TIERS by domain;
+# the value here is informational only.
+
+# RBI press releases
+# https://www.rbi.org.in/Scripts/NotificationUser.aspx  # india=true tier=1
+
+# Federal Reserve press conferences
+# https://www.federalreserve.gov/feeds/press_all.xml  # tier=1
+
+# Indian general election commission YouTube auto-RSS
+# https://www.youtube.com/feeds/videos.xml?channel_id=UC_xxxx  # india=true tier=1

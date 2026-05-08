@@ -298,12 +298,26 @@ class RiskState(Base):
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
+    """Build the SQLAlchemy engine.
+
+    Supports three URL forms:
+    - sqlite:///path/to.db                       — local file
+    - sqlite+libsql://<host>/?authToken=…        — Turso (hosted libSQL)
+      shorthand `libsql://<host>?authToken=…` is auto-rewritten to the dialect+driver form.
+    - postgresql://…                             — for cloud Postgres (e.g. Supabase)
+    """
     settings = get_settings()
     url = settings.database_url
-    if url.startswith("sqlite"):
+
+    # Turso shorthand → SQLAlchemy URL with the libsql dialect/driver.
+    if url.startswith("libsql://"):
+        url = "sqlite+libsql://" + url[len("libsql://"):]
+
+    if url.startswith("sqlite") and "libsql" not in url:
         path = url.split("///", 1)[-1]
         if path and path != ":memory:":
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
     engine = create_engine(url, future=True)
     return engine
 

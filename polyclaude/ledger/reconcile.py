@@ -14,11 +14,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 
 from polyclaude.clob.client import ClobWrapper
 from polyclaude.ledger.db import (
-    CalibrationPoint, Decision, Fill, Market, Order, OrderStatus, get_session,
+    CalibrationPoint, Decision, Fill, Market, OracleCall, Order, OrderStatus, get_session,
 )
 from polyclaude.logging_setup import get_logger
 
@@ -32,6 +32,77 @@ def _brier(p: float, y: int) -> float:
 def _log_loss(p: float, y: int, eps: float = 1e-6) -> float:
     p = min(max(p, eps), 1 - eps)
     return -(y * math.log(p) + (1 - y) * math.log(1 - p))
+
+
+async def pull_resolved_outcomes(limit: int = 200) -> int:
+    """Poll Gamma for resolved markets we know about and write the outcome.
+
+    For each Market in our DB without resolved_outcome, query Gamma and check
+    `closed=true` + the outcome flag on its tokens.
+
+    Returns the number of markets we just marked resolved.
+    """
+    from polyclaude.markets.gamma import GammaClient
+
+    updated = 0
+    with get_session() as session:
+        # Pick markets that should be resolvable: end_date in the past, not yet resolved.
+        from datetime import datetime, timezone as _tz
+
+        candidates = session.execute(
+            select(Market.id)
+            .where(Market.resolved_outcome.is_(None))
+            .where((Market.resolves_at.is_(None)) | (Market.resolves_at < datetime.now(_tz.utc)))
+            .limit(limit)
+        ).all()
+        market_ids = [row[0] for row in candidates]
+
+    if not market_ids:
+        return 0
+
+    async with GammaClient() as gamma:
+        for mid in market_ids:
+            try:
+                m = await gamma.get_market(mid)
+            except Exception as e:  # pragma: no cover
+                log.warning("reconcile.gamma_lookup_failed", market=mid, err=str(e))
+                continue
+            if m is None or not m.closed:
+                continue
+            outcome = _extract_outcome(m.raw)
+            if outcome is None:
+                continue
+            with get_session() as session:
+                row = session.get(Market, mid)
+                if row is None:
+                    continue
+                row.resolved_outcome = outcome
+                session.commit()
+                updated += 1
+    log.info("reconcile.resolved_pulled", updated=updated, candidates=len(market_ids))
+    return updated
+
+
+def _extract_outcome(raw: dict | None) -> str | None:
+    """Inspect a Gamma `market` payload and decide which side resolved YES."""
+    if not raw:
+        return None
+    # Most common shape: tokens=[{outcome:"Yes", winner:true}, {outcome:"No", winner:false}]
+    tokens = raw.get("tokens") or []
+    for t in tokens:
+        if t.get("winner") is True:
+            return (t.get("outcome") or "").upper() or None
+    # Fallback: outcomePrices array — last price 1.0 wins
+    prices = raw.get("outcomePrices")
+    outcomes = raw.get("outcomes")
+    if isinstance(prices, list) and isinstance(outcomes, list) and len(prices) == len(outcomes):
+        try:
+            best = max(range(len(prices)), key=lambda i: float(prices[i]))
+            if float(prices[best]) >= 0.99:
+                return str(outcomes[best]).upper()
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 def fill_calibration_points(market_outcomes: dict[str, str] | None = None) -> int:
@@ -65,12 +136,23 @@ def fill_calibration_points(market_outcomes: dict[str, str] | None = None) -> in
             outcome_yes = (market.resolved_outcome or "").upper() == "YES"
             y = 1 if outcome_yes else 0
             p = float(decision.committed_p)
+            # Pull confidence from the probability OracleCall in the same decision group.
+            conf_row = session.execute(
+                select(OracleCall.confidence)
+                .where(
+                    OracleCall.decision_group_id == decision.id,
+                    OracleCall.call_type == "probability",
+                )
+                .order_by(desc(OracleCall.ts))
+                .limit(1)
+            ).first()
+            confidence = float(conf_row[0]) if conf_row and conf_row[0] is not None else 0.0
             cp = CalibrationPoint(
                 decision_id=decision.id,
                 market_id=market.id,
                 strategy=decision.strategy,
                 p_predicted=p,
-                confidence=0.0,  # populated below if oracle confidence is available
+                confidence=confidence,
                 outcome_yes=outcome_yes,
                 brier=_brier(p, y),
                 log_loss=_log_loss(p, y),

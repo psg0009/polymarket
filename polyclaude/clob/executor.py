@@ -9,6 +9,7 @@ The executor:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from dataclasses import dataclass
@@ -98,16 +99,42 @@ class Executor:
             log.error("executor.cancel_failed", err=str(e), order=order_id)
             return False
 
-    def reprice_loop(
+    async def reprice_loop(
         self,
         req: PlaceRequest,
         max_attempts: int = 3,
         sleep_s: float = 60.0,
     ) -> PlaceResult:
-        """Place GTC; if not filled within sleep_s, cancel and reprice once.
+        """Async place + cancel/replace loop.
 
-        Reads back fills via clob.get_trades to detect fills.
+        - Place via `asyncio.to_thread` so the sync SDK doesn't block the loop.
+        - Sleep with `asyncio.sleep` so the daemon can make progress on other tasks.
+        - On every iteration check whether the order filled by reading
+          `clob.get_trades(market=…)`. If yes, exit; otherwise cancel and try again.
         """
+        last: PlaceResult | None = None
+        for attempt in range(max_attempts):
+            req.attempt = attempt
+            res = await asyncio.to_thread(self.place, req)
+            last = res
+            if not res.ok or not res.order_id or res.order_id.startswith("DRY-"):
+                return res
+            await asyncio.sleep(sleep_s)
+            try:
+                trades = await asyncio.to_thread(self.clob.get_trades, req.market_id)
+                filled = any(t.get("orderID") == res.order_id for t in trades or [])
+                if filled:
+                    return res
+                await asyncio.to_thread(self.cancel, res.order_id)
+            except Exception as e:  # pragma: no cover
+                log.warning("executor.reprice_check_failed", err=str(e))
+                return res
+        return last  # type: ignore[return-value]
+
+    def reprice_loop_sync(
+        self, req: PlaceRequest, max_attempts: int = 3, sleep_s: float = 60.0,
+    ) -> PlaceResult:
+        """Synchronous variant for non-async callers (e.g. one-shot scripts)."""
         last: PlaceResult | None = None
         for attempt in range(max_attempts):
             req.attempt = attempt

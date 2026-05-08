@@ -2,41 +2,43 @@
 
 A Polymarket trading agent that uses Claude as a calibrated probability oracle, with multi-modal news + audio ingestion (FinBERT/FinVADER/Whisper), an Indian-markets vertical, and a backtester that reuses the live pipeline.
 
-> Status: scaffold complete; dry-run path is end-to-end functional. Heavy NLP / audio / Streamlit deps are optional and lazy-loaded — minimal installs work.
+> Status: full pipeline wired end-to-end (P0+P1+P2 from the spec). Heavy NLP / audio / Streamlit deps are optional and lazy-loaded; minimal installs work.
 
 ## Why this design
 
-Three rules drive the architecture, and all three are easy to skip and expensive to skip:
+Three rules drive the architecture and all three are easy to skip and expensive to skip:
 
-1. **No anchoring on price.** The probability call to Claude *never* receives the current market price. Sizing is a separate, second call. This is the single change that most improves calibration vs naive agents (see `tests/test_anchoring.py`).
-2. **Allowance preflight.** Polygon EOA traders need three exchange-contract approvals before any order can settle. We refuse to trade if those are missing and print the exact `approve` calls to make. (`polyclaude preflight`)
-3. **Backtester reuses live modules.** No separate "research" code path. Any backtest improvement is a live improvement, and every prompt is replayed through the same `ValueStrategy.decide()`.
+1. **No anchoring on price.** The probability call to Claude *never* receives the current market price. Sizing is a separate, second call. (`tests/test_anchoring.py`)
+2. **Allowance preflight.** Polygon EOA traders need three exchange-contract approvals before any order can settle. We refuse to trade if those are missing and print the exact `approve` calls. (`polyclaude preflight`)
+3. **Backtester reuses live modules.** No separate "research" code path — `backtest/replay.py` walks `BookSnapshot` rows through the same `ValueStrategy.decide()` the live agent uses.
 
 ## Layout
 
 ```
 polyclaude/
-├── config.py              # Pydantic settings from .env
-├── clob/                  # py-clob-client wrapper, allowance preflight, executor
+├── config.py              # Pydantic settings from .env + Streamlit secrets bridge
+├── logging_setup.py
+├── clob/                  # client wrapper, allowance preflight, executor with async reprice + idempotency
 ├── markets/               # Gamma API, snapshot persistence, India tagger
-├── ingest/                # RSS news, NewsAPI, faster-whisper audio, India sources
-├── nlp/                   # FinBERT + FinVADER ensemble, MiniLM event↔market linker
-├── oracle/                # Claude calls: ambiguity + probability + sizing (3-call pattern)
-├── strategy/              # Fractional-Kelly sizing + value / news_event / india_elections
-├── ledger/                # SQLAlchemy schema, persist helpers, reconcile job
-├── backtest/              # Walk-forward replay reusing live modules + metrics (Brier, calibration, Sharpe)
-├── ui/                    # Streamlit dashboard
-└── main.py                # `polyclaude` CLI: scan / trade / reconcile / backtest / preflight / init
+├── ingest/                # RSS / NewsAPI / Whisper audio (audio_scheduler.py polls feeds and transcribes)
+├── nlp/                   # FinBERT (lazy), FinVADER, recency-decay ensemble, MiniLM linker (lazy)
+├── pipeline/discover.py   # ingest → score → link → persist Events+Signals; feeds evidence into the oracle
+├── oracle/                # Three-call pattern: ambiguity → probability (no price) → sizing
+├── strategy/              # Fractional Kelly + value / news_event / india_elections
+├── ledger/                # Schema, persist helpers, reconcile.py (pulls Gamma resolutions, writes CalibrationPoints)
+├── backtest/              # replay (reuses live modules), metrics, harness, shadow.py (CI re-score)
+├── ui/dashboard.py        # Streamlit (reads from local SQLite or hosted Turso/Postgres)
+└── main.py                # CLI: init / preflight / scan / trade / run / reconcile / backtest / shadow
 ```
 
 ## Setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e .                 # core
-pip install -e ".[nlp,audio,ui,dev]"  # optional: FinBERT, Whisper, Streamlit, pytest
-cp .env.example .env             # fill in PRIVATE_KEY, FUNDER, ANTHROPIC_API_KEY
-polyclaude init                  # create the SQLite schema
+pip install -e .                          # core
+pip install -e ".[nlp,audio,ui,dev]"      # + FinBERT, Whisper, Streamlit, pytest
+cp .env.example .env                      # fill in PRIVATE_KEY, FUNDER, ANTHROPIC_API_KEY
+polyclaude init                           # create the SQLite schema
 ```
 
 ### Allowance approval (EOA mode only)
@@ -50,41 +52,91 @@ USDC.approve(0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296, MAX_UINT256)
 CTF.setApprovalForAll(<each of the above>, true)
 ```
 
-`polyclaude preflight` reads the current allowances on-chain and tells you exactly which calls are missing. Proxy users (`SIGNATURE_TYPE=2`/`3`) can skip this step — approvals live on the proxy.
+`polyclaude preflight` reads current allowances on-chain and tells you exactly which calls are missing. Proxy users (`SIGNATURE_TYPE=2`/`3`) skip this — approvals live on the proxy.
 
-## Usage
+## CLI
 
 ```bash
-# 1. Dry-run scan: print decision table for the top 50 markets, write the run to SQLite.
+# One-shot dry-run scan with full RSS+NLP pre-pass (default).
 polyclaude scan --limit 50
 
-# 2. India only.
+# India only.
 polyclaude scan --india-only
 
-# 3. Live trading, capped at $50/day, with a typed-confirmation prompt.
-polyclaude trade --live --max-notional 50
+# Long-running daemon — three cadences:
+#   * rescan every 10 min (pull markets, run RSS+NLP, score with Claude, place orders)
+#   * news-event hot path every 1 min (re-evaluate any market whose latest signal has |z| >= 3)
+#   * snapshots every 1 h (persist orderbook depth for backtest fuel)
+#   * reconcile every ~4 h (pull resolved outcomes from Gamma, fill CalibrationPoints)
+polyclaude run --max-notional 100 --rescan-seconds 600 --hotpath-seconds 60 --snapshot-seconds 3600
 
-# 4. Nightly: reconcile fills, fill CalibrationPoints, print Brier summary.
+# Live trading: the daemon respects --live and confirms the cap before placing real orders.
+polyclaude run --live --max-notional 50
+
+# Audio scheduler (separate process; polls audio_sources.txt and transcribes via Whisper).
+python -m polyclaude.ingest.audio_scheduler
+
+# Manual reconcile.
 polyclaude reconcile
 
-# 5. Walk-forward replay against historical snapshots in your ledger.
+# Backtest.
 polyclaude backtest --from 2025-01-01 --to 2025-12-31 --strategy value --capital 1000
 
-# 6. Streamlit dashboard.
-streamlit run polyclaude/ui/dashboard.py
+# Shadow CI: re-score last 7 days vs. baseline; exit non-zero on regression.
+polyclaude shadow --days 7 --baseline 0.20
 ```
 
 ## Calibration philosophy
 
-The oracle returns three things: a probability, a confidence, and a rationale. Calibration matters more than direction — a well-calibrated agent that says 60% is right ~60% of the time, and that's the goal. Over-confidence at the tails is the most expensive failure mode, so the prompts (`polyclaude/oracle/prompts.py`) explicitly instruct Claude to start from a base rate / reference class and update from there, rather than starting at 0.5 by habit.
+The oracle runs three calls per market:
 
-We enforce three gates before placing a trade:
+1. **Ambiguity.** `clarity < 0.7` → skip. `0.7 ≤ clarity < 0.85` → halve size. `verdict == "hostile"` → skip.
+2. **Probability.** Claude **never** sees the current market price (`oracle.evaluate_probability` strips `yes_price` / `midpoint` / `market_p` from the market dict before calling). Evidence rows include explicit `tier=N/OFFICIAL|WIRE|NATIONAL|REGIONAL|SOCIAL` so Claude can weight ECI/PIB > Reuters > regional explicitly.
+3. **Sizing.** Sees the price + book depth + signal volatility. Computes the edge.
 
-1. **Ambiguity gate.** Claude reads the resolution rules first. `clarity < 0.7` skips the market; `0.7 ≤ clarity < 0.85` halves the size; `verdict == "hostile"` always skips.
-2. **Edge gate.** `|p_oracle - p_market| ≥ 3¢` (configurable).
-3. **Depth gate.** Book depth within 2¢ of midpoint must exceed `MIN_BOOK_DEPTH_USD`.
+The transition from dry-run to live is gated on Brier ≤ 0.20 over ≥ 100 resolved markets — a single SQL query against `calibration_points` tells you whether you've earned the right. The Streamlit dashboard's "Live status" tab shows this gate in real time.
 
-The transition from dry-run to live is gated on Brier ≤ 0.20 over ≥ 100 resolved markets — a single SQL query against the `calibration_points` table tells you whether you've earned the right.
+## Always-on dashboard (Path A — Streamlit Cloud + Turso)
+
+The agent runs locally / on a tiny VM and writes to a hosted DB; the Streamlit Cloud dashboard reads from the same DB and stays live 24/7.
+
+### Step 1. Provision Turso (~2 min)
+
+```bash
+# Install the Turso CLI (https://docs.turso.tech/cli/installation)
+brew install tursodatabase/tap/turso          # macOS
+# or:  curl -sSfL https://get.tur.so/install.sh | bash
+
+turso auth signup
+turso db create polyclaude
+turso db show polyclaude --url               # → libsql://polyclaude-<org>.turso.io
+turso db tokens create polyclaude            # → eyJhbGc...
+```
+
+Compose the URL:
+```
+sqlite+libsql://polyclaude-<org>.turso.io/?authToken=eyJhbGc...
+```
+
+### Step 2. Initialise the schema and run the agent locally pointing at Turso
+
+```bash
+export DATABASE_URL='sqlite+libsql://polyclaude-<org>.turso.io/?authToken=...'
+polyclaude init
+polyclaude run --max-notional 25         # the agent writes Events / OracleCalls / Decisions to Turso
+```
+
+### Step 3. Deploy the dashboard to Streamlit Cloud (~3 min)
+
+1. Sign in at https://share.streamlit.io with your GitHub account.
+2. Click *New app* → repo `psg0009/polymarket`, branch `claude/polymarket-trading-agent-Wo9yk`, **Main file path** `polyclaude/ui/dashboard.py`.
+3. *Advanced settings* → **Secrets** → paste:
+   ```toml
+   DATABASE_URL = "sqlite+libsql://polyclaude-<org>.turso.io/?authToken=..."
+   ```
+4. Deploy. Public URL is `https://polyclaude-<random>.streamlit.app`.
+
+The dashboard re-deploys on every push to the chosen branch. If you only need the dashboard reading data, your agent process is the only thing that needs Turso write credentials — the Streamlit Cloud app uses the same URL but only reads.
 
 ## Ledger schema (chain of custody)
 
@@ -98,9 +150,9 @@ Every link foreign-keys to the prior step. A losing trade can be replayed all th
 
 ## Indian markets vertical
 
-`polyclaude/markets/india.py` tags markets resolving on Indian elections, RBI rate decisions, IPL/cricket, IPOs, and Nifty/Sensex. `polyclaude/ingest/india_sources.py` ships the canonical RSS feed bundle (PIB, RBI, PTI, The Hindu, Indian Express, NDTV, Times of India, Mint, Business Standard). The `IndiaElectionStrategy` adds an exit-poll embargo window in IST so the scheduler doesn't trade through polling hours.
+Markets resolving on Indian elections, RBI rate decisions, IPL/cricket, IPOs, and Nifty/Sensex are auto-tagged via word-boundary regex (`markets/india.py`). India election markets route through `IndiaElectionStrategy`, which adds an IST-aware exit-poll embargo so the daemon refuses to place new orders during polling hours.
 
-Source weighting (in `ingest/normalizer.py`):
+Source weighting (`ingest/normalizer.py`):
 
 | Tier | Examples |
 | ---- | -------- |
@@ -110,25 +162,27 @@ Source weighting (in `ingest/normalizer.py`):
 | 4 (regional) | News18, The Quint, Scroll |
 | 5 (social)   | Twitter/X, Reddit |
 
-The probability prompt explicitly tells Claude this hierarchy.
+Each evidence row passed to Claude includes `tier=N/<LABEL>` so the oracle can weight by hand. The probability prompt explicitly tells Claude this hierarchy.
 
-## Tests
+## Tests + CI
 
 ```bash
-pytest
+pytest                            # 50+ unit tests
+POLYCLAUDE_E2E=1 pytest -k smoke  # opt-in real-API smoke test (needs ANTHROPIC_API_KEY)
 ```
 
-50 tests covering: Kelly math, cap enforcement, JSON parser fallback, Pydantic schema validation, the no-anchoring guard (oracle.evaluate_probability strips `yes_price` / `midpoint` / `market_p` from the market dict before the API call), the ambiguity gate decision table, idempotency-key behavior, the India tagger, ledger round-trip, ensemble decay, and backtest metrics.
+Two GitHub Actions workflows ship:
+
+- `.github/workflows/tests.yml` — runs pytest on every push/PR.
+- `.github/workflows/shadow.yml` — daily cron + on-PR; re-scores last 7 days of resolved markets and **fails the build if Brier exceeds the baseline** (default 0.20).
+
+The shadow job is what enforces calibration-aware merge gating: if a prompt or strategy change worsens Brier on real history, the PR can't merge.
 
 ## Optional dependencies
 
-- `polyclaude[nlp]` — `transformers`, `torch`, `sentence-transformers` for FinBERT and the event↔market linker.
-- `polyclaude[audio]` — `faster-whisper` for press-conference and earnings-call transcription.
-- `polyclaude[ui]` — `streamlit`, `pandas`, `matplotlib` for the dashboard.
+- `polyclaude[nlp]` — `transformers`, `torch`, `sentence-transformers` for FinBERT and the MiniLM linker.
+- `polyclaude[audio]` — `faster-whisper` for the audio scheduler.
+- `polyclaude[ui]` — `streamlit`, `pandas`, `matplotlib`.
 - `polyclaude[dev]` — `pytest`, `vcrpy`, `ruff`, `mypy`.
 
-The core agent runs without any of these; FinBERT degrades to neutral scores, the linker degrades to keyword Jaccard, and the dashboard is simply unavailable.
-
-## What's intentionally not here
-
-No backwards-compat shims, no auto-migration, no production deployment recipe. This is a dry-run-first agent intended to be run interactively while you tune the prompts and watch the calibration curve flatten. Once Brier on resolved markets is in the right ballpark, flip `--live` on with a small `--max-notional` cap.
+The core agent runs without any of these — FinBERT degrades to neutral scores, the linker degrades to keyword Jaccard, and the dashboard is simply unavailable.
