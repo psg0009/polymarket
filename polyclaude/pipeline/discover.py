@@ -98,13 +98,18 @@ def link_and_persist(
             market_baselines[mid].append(float(sc))
 
     for raw in raws:
-        if raw.is_india is False:
-            # Auto-flag if any market it links to is India.
-            pass
-        ev = save_event(raw)
+        try:
+            ev = save_event(raw)
+        except Exception as e:
+            log.warning("pipeline.save_event_failed", source=raw.source, err=str(e))
+            continue
         if ev is None:
             continue  # already seen
-        fb, vd = _score_event(raw.text)
+        try:
+            fb, vd = _score_event(raw.text)
+        except Exception as e:
+            log.warning("pipeline.score_failed", err=str(e))
+            continue
         score = ensemble.combine(fb, vd, raw.ts or now, now=now)
         # Link to every market with link_score >= threshold.
         new_signals: list[Signal] = []
@@ -138,9 +143,12 @@ def link_and_persist(
             )
             market_baselines[m.id].append(score.ensemble_score)
         if new_signals:
-            with get_session() as session:
-                session.add_all(new_signals)
-                session.commit()
+            try:
+                with get_session() as session:
+                    session.add_all(new_signals)
+                    session.commit()
+            except Exception as e:
+                log.warning("pipeline.signals_commit_failed", err=str(e))
 
     # Sort newest first per market
     for mid in by_market:

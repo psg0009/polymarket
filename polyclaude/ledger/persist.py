@@ -62,12 +62,32 @@ def save_snapshot(snap: BookSnapshot | None) -> None:
 
 
 def save_event(raw: RawEvent) -> Event | None:
+    """Persist a single Event row, idempotently.
+
+    Three layers of dedup:
+    1. Primary-key lookup by content-hash id (same source + url + ts + text).
+    2. (source, url) lookup — catches the case where the same article was
+       previously ingested with a slightly different timestamp / text snippet,
+       so its content-hash id differs but the unique constraint still applies.
+    3. IntegrityError fallback — defensive; if a race or hash collision slips
+       through, swallow the constraint violation and return None.
+    """
     ev = to_event(raw)
     with get_session() as session:
         if session.get(Event, ev.id) is not None:
             return None
+        if ev.url:
+            existing = session.execute(
+                select(Event.id).where(Event.source == ev.source, Event.url == ev.url)
+            ).first()
+            if existing is not None:
+                return None
         session.add(ev)
-        session.commit()
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            return None
         return ev
 
 
