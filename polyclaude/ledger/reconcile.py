@@ -84,17 +84,49 @@ async def pull_resolved_outcomes(limit: int = 200) -> int:
 
 
 def _extract_outcome(raw: dict | None) -> str | None:
-    """Inspect a Gamma `market` payload and decide which side resolved YES."""
+    """Inspect a Gamma `market` payload and decide which side resolved YES.
+
+    Handles three shapes Gamma returns over time:
+
+    1. tokens=[{outcome:"Yes", winner:true}, {outcome:"No", winner:false}]
+    2. tokens=[{outcome:"Yes", price:"1"},  {outcome:"No", price:"0"}]
+       (winner field absent; price 1.0 indicates the winning side)
+    3. outcomes=[...] + outcomePrices=[...] arrays (sometimes JSON-string encoded)
+    """
     if not raw:
         return None
-    # Most common shape: tokens=[{outcome:"Yes", winner:true}, {outcome:"No", winner:false}]
+
     tokens = raw.get("tokens") or []
     for t in tokens:
         if t.get("winner") is True:
             return (t.get("outcome") or "").upper() or None
-    # Fallback: outcomePrices array — last price 1.0 wins
+    # Fallback A: token list with prices but no winner flag.
+    for t in tokens:
+        try:
+            price = float(t.get("price", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if price >= 0.99:
+            return (t.get("outcome") or "").upper() or None
+
+    # Fallback B: parallel outcomes / outcomePrices arrays.
     prices = raw.get("outcomePrices")
     outcomes = raw.get("outcomes")
+    # Both may arrive as JSON-encoded strings.
+    if isinstance(prices, str):
+        try:
+            import json as _json
+
+            prices = _json.loads(prices)
+        except Exception:
+            prices = None
+    if isinstance(outcomes, str):
+        try:
+            import json as _json
+
+            outcomes = _json.loads(outcomes)
+        except Exception:
+            outcomes = None
     if isinstance(prices, list) and isinstance(outcomes, list) and len(prices) == len(outcomes):
         try:
             best = max(range(len(prices)), key=lambda i: float(prices[i]))
@@ -166,7 +198,18 @@ def fill_calibration_points(market_outcomes: dict[str, str] | None = None) -> in
 
 
 def reconcile_fills(clob: ClobWrapper) -> int:
-    """For every open/partial order, fetch trades and write missing Fill rows."""
+    """For every open/partial order, fetch trades and write missing Fill rows.
+
+    No-ops gracefully when:
+    - The settings don't include trading credentials (CLOB requires API auth
+      derived from a private key + funder, and we won't have meaningful trades
+      to reconcile without them).
+    - The order id starts with `DRY-` — dry-run orders have no on-chain
+      counterpart so there's nothing to reconcile.
+    """
+    if not clob.settings.has_trading_creds():
+        log.info("reconcile.fills_skipped", reason="no trading creds")
+        return 0
     inserted = 0
     with get_session() as session:
         open_orders: Iterable[Order] = session.execute(
@@ -174,6 +217,11 @@ def reconcile_fills(clob: ClobWrapper) -> int:
                 Order.status.in_([OrderStatus.pending, OrderStatus.open, OrderStatus.partially_filled])
             )
         ).scalars().all()
+        # Filter out dry-run synthetic orders.
+        open_orders = [o for o in open_orders if not o.id.startswith("DRY-")]
+        if not open_orders:
+            log.info("reconcile.fills_skipped", reason="no live open orders")
+            return 0
         seen_trade_ids = {
             tid for (tid,) in session.execute(select(Fill.trade_id)).all()
         }
