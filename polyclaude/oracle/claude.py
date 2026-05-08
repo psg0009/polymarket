@@ -77,6 +77,33 @@ class CallTrace:
 # --- JSON extraction --------------------------------------------------------
 
 
+# Anthropic list-price USD per million tokens. Used by the daily-budget guard.
+# Tracks list pricing as of the model release notes; if pricing changes, update
+# here and `_today_spend_usd()` will pick it up automatically. Worst-case
+# behaviour if a model is missing from the table is conservative: we charge
+# Opus rates so we under-budget rather than over.
+_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-opus-4-7": (15.0, 75.0),
+    "claude-opus-4-6": (15.0, 75.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
+}
+_DEFAULT_PRICING = (15.0, 75.0)
+
+
+def _price_for(model: str) -> tuple[float, float]:
+    if not model:
+        return _DEFAULT_PRICING
+    return _PRICING_USD_PER_MTOK.get(model, _DEFAULT_PRICING)
+
+
+def call_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+    in_price, out_price = _price_for(model)
+    return (input_tokens or 0) * in_price / 1_000_000 + (output_tokens or 0) * out_price / 1_000_000
+
+
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -131,6 +158,26 @@ class ClaudeOracle:
         max_tokens: int = 1024,
     ) -> tuple[str, dict, CallTrace]:
         model = model or self.settings.anthropic_model
+        # --- Daily budget guard -----------------------------------------
+        # Refuse the call entirely if today's running estimate already
+        # exceeds the configured cap. Caller treats a None / empty parsed
+        # response as a skipped market — same as a malformed JSON response.
+        budget = float(self.settings.anthropic_daily_usd_budget)
+        spent = _today_spend_usd()
+        if spent >= budget:
+            log.warning(
+                "oracle.budget_exceeded",
+                spent=round(spent, 4), budget=budget, call_type=call_type,
+            )
+            trace = CallTrace(
+                decision_group_id=decision_group_id, call_type=call_type,
+                model=model, prompt_system=system, prompt_user=user,
+                raw_response="", parsed={}, input_tokens=0, output_tokens=0,
+                latency_ms=0,
+                error=f"daily anthropic budget exceeded (${spent:.2f} ≥ ${budget:.2f})",
+            )
+            return "", {}, trace
+
         t0 = time.perf_counter()
         err: str | None = None
         raw = ""
@@ -299,3 +346,33 @@ class ClaudeOracle:
             except ValidationError as e:
                 log.warning("oracle.sizing_parse_fail", attempt=attempt, err=str(e))
         return None, trace
+
+
+def _today_spend_usd() -> float:
+    """Sum estimated USD cost of every OracleCall made since 00:00 UTC today.
+
+    Reads `model`, `input_tokens`, `output_tokens` columns from the ledger and
+    multiplies by the model's list price. Returns 0.0 on any DB error so a
+    transient ledger failure can't accidentally lock the agent out.
+    """
+    try:
+        from datetime import datetime, time as dtime, timezone
+
+        from sqlalchemy import select
+
+        from polyclaude.ledger.db import OracleCall, get_session
+
+        midnight = datetime.combine(
+            datetime.now(timezone.utc).date(), dtime.min, tzinfo=timezone.utc
+        )
+        with get_session() as session:
+            rows = session.execute(
+                select(OracleCall.model, OracleCall.input_tokens, OracleCall.output_tokens)
+                .where(OracleCall.ts >= midnight)
+            ).all()
+        total = 0.0
+        for model, in_tok, out_tok in rows:
+            total += call_cost_usd(model or "", int(in_tok or 0), int(out_tok or 0))
+        return total
+    except Exception:
+        return 0.0

@@ -52,7 +52,13 @@ def main() -> None:  # pragma: no cover - UI entry
         orders = pd.read_sql(select(Order).order_by(Order.placed_at.desc()).limit(500), session.bind)
         calib = pd.read_sql(select(CalibrationPoint), session.bind)
 
-    col1, col2, col3, col4 = st.columns(4)
+    from polyclaude.config import get_settings
+    from polyclaude.oracle.claude import _today_spend_usd
+
+    spend_today = _today_spend_usd()
+    budget = float(get_settings().anthropic_daily_usd_budget)
+
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Decisions", len(decisions))
     col2.metric("Orders", len(orders))
     col3.metric(
@@ -63,6 +69,13 @@ def main() -> None:  # pragma: no cover - UI entry
         col4.metric("Brier", f"{calib['brier'].mean():.3f}", help=f"n={len(calib)}")
     else:
         col4.metric("Brier", "n/a")
+    col5.metric(
+        "Anthropic $ today",
+        f"${spend_today:.2f}",
+        delta=f"${budget - spend_today:.2f} left" if spend_today < budget else "OVER BUDGET",
+        delta_color="normal" if spend_today < budget else "inverse",
+        help=f"daily cap: ${budget:.2f}",
+    )
 
     tabs = st.tabs(["Decisions", "Orders", "Calibration", "Live status"])
     with tabs[0]:

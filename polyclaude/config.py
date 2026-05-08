@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="")
     anthropic_model: str = Field(default="claude-opus-4-7")
     anthropic_model_fast: str = Field(default="claude-haiku-4-5-20251001")
+    # Hard daily ceiling on Anthropic spend, USD. The oracle layer refuses
+    # to make new API calls once today's running estimate exceeds this.
+    anthropic_daily_usd_budget: Decimal = Field(default=Decimal("50"))
 
     # --- Risk caps ---
     max_notional_per_trade: Decimal = Field(default=Decimal("25"))
