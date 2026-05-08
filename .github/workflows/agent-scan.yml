@@ -1,0 +1,51 @@
+name: agent-scan
+
+# GitHub-only deployment: this Action is the agent. It runs polyclaude scan
+# every 10 minutes (configurable below), pulls news, scores via Claude, places
+# orders in dry-run by default, and writes everything to your hosted Turso DB.
+#
+# To enable, set these repo secrets in
+#   Settings → Secrets and variables → Actions:
+#
+#   DATABASE_URL          (Turso URL incl. authToken)
+#   ANTHROPIC_API_KEY     (Claude oracle)
+#   PRIVATE_KEY           (only needed for --live; leave unset for dry-run)
+#   FUNDER                (Polygon address; only needed for --live)
+#
+# To go live, change `polyclaude scan` to `polyclaude trade --live --max-notional 25
+# --yes-i-am-sure` below — but only after the dashboard's "Live status" tab says
+# Brier ≤ 0.20 over ≥ 100 resolved markets.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes; GitHub minimum is */5
+  workflow_dispatch: {}        # manual trigger button in the Actions UI
+
+concurrency:
+  group: agent-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8         # well under the 10-minute cron interval
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Initialise schema (idempotent)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m polyclaude.main init
+      - name: Run scan (dry-run)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          FUNDER: ${{ secrets.FUNDER }}
+          DRY_RUN: "true"
+          MAX_NOTIONAL_PER_DAY: "25"
+        run: python -m polyclaude.main scan --limit 50

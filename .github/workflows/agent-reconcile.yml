@@ -1,0 +1,25 @@
+name: agent-reconcile
+
+# Daily: pull resolved-market outcomes from Gamma, fill CalibrationPoints,
+# print Brier summary. Runs at 06:00 UTC.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Reconcile
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m polyclaude.main reconcile

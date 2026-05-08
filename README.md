@@ -96,47 +96,81 @@ The oracle runs three calls per market:
 
 The transition from dry-run to live is gated on Brier ≤ 0.20 over ≥ 100 resolved markets — a single SQL query against `calibration_points` tells you whether you've earned the right. The Streamlit dashboard's "Live status" tab shows this gate in real time.
 
-## Always-on dashboard (Path A — Streamlit Cloud + Turso)
+## Always-on, GitHub-only deploy (zero local setup)
 
-The agent runs locally / on a tiny VM and writes to a hosted DB; the Streamlit Cloud dashboard reads from the same DB and stays live 24/7.
+Run the entire stack from a browser. No laptop, no VM. The agent lives in GitHub Actions, the dashboard lives in Streamlit Cloud, the database lives in Turso. Total setup ~10 min.
 
-### Step 1. Provision Turso (~2 min)
+### Step 1. Create a Turso database (browser-only)
 
-```bash
-# Install the Turso CLI (https://docs.turso.tech/cli/installation)
-brew install tursodatabase/tap/turso          # macOS
-# or:  curl -sSfL https://get.tur.so/install.sh | bash
-
-turso auth signup
-turso db create polyclaude
-turso db show polyclaude --url               # → libsql://polyclaude-<org>.turso.io
-turso db tokens create polyclaude            # → eyJhbGc...
-```
-
-Compose the URL:
-```
-sqlite+libsql://polyclaude-<org>.turso.io/?authToken=eyJhbGc...
-```
-
-### Step 2. Initialise the schema and run the agent locally pointing at Turso
-
-```bash
-export DATABASE_URL='sqlite+libsql://polyclaude-<org>.turso.io/?authToken=...'
-polyclaude init
-polyclaude run --max-notional 25         # the agent writes Events / OracleCalls / Decisions to Turso
-```
-
-### Step 3. Deploy the dashboard to Streamlit Cloud (~3 min)
-
-1. Sign in at https://share.streamlit.io with your GitHub account.
-2. Click *New app* → repo `psg0009/polymarket`, branch `claude/polymarket-trading-agent-Wo9yk`, **Main file path** `polyclaude/ui/dashboard.py`.
-3. *Advanced settings* → **Secrets** → paste:
-   ```toml
-   DATABASE_URL = "sqlite+libsql://polyclaude-<org>.turso.io/?authToken=..."
+1. Go to https://app.turso.tech and sign in with your GitHub account.
+2. *Create database* → name `polyclaude`, any region. Free tier is fine.
+3. On the database page, click *Generate token* → copy it.
+4. From the *Connect* card, copy the **libsql://** URL.
+5. Compose the SQLAlchemy URL:
    ```
-4. Deploy. Public URL is `https://polyclaude-<random>.streamlit.app`.
+   sqlite+libsql://polyclaude-<your-org>.turso.io/?authToken=<paste token>
+   ```
 
-The dashboard re-deploys on every push to the chosen branch. If you only need the dashboard reading data, your agent process is the only thing that needs Turso write credentials — the Streamlit Cloud app uses the same URL but only reads.
+### Step 2. Add secrets to GitHub
+
+Go to https://github.com/psg0009/polymarket/settings/secrets/actions and add:
+
+| Name                | Value                                                                 |
+| ------------------- | --------------------------------------------------------------------- |
+| `DATABASE_URL`      | the `sqlite+libsql://…` URL from Step 1                               |
+| `ANTHROPIC_API_KEY` | your Claude API key                                                   |
+| `PRIVATE_KEY`       | *(only when going live)* Polygon EOA private key (no `0x` prefix)     |
+| `FUNDER`            | *(only when going live)* Polygon address that holds USDC              |
+
+That's all dry-run needs. The agent will run on cron and write to Turso.
+
+### Step 3. Enable the workflows
+
+`.github/workflows/` already contains three Action jobs that ship with this repo:
+
+| Workflow              | Cadence       | What it does                                                  |
+| --------------------- | ------------- | ------------------------------------------------------------- |
+| `agent-scan.yml`      | every 10 min  | RSS → NLP → Claude oracle → decisions → ledger writes         |
+| `agent-snapshot.yml`  | hourly at :05 | Orderbook snapshots only (backtest fuel)                      |
+| `agent-reconcile.yml` | daily 06:00 UTC | Pulls resolved outcomes from Gamma, fills CalibrationPoints |
+| `shadow.yml`          | daily 06:00 UTC | Re-scores last 7 days; fails build on Brier regression       |
+| `tests.yml`           | every push    | pytest                                                       |
+
+GitHub Actions is **free for public repos with no minute limit**, so this runs forever at zero cost.
+
+To start: open https://github.com/psg0009/polymarket/actions, find *agent-scan*, click *Enable workflow*. Repeat for the others. Each has a *Run workflow* button to trigger immediately if you don't want to wait for the cron.
+
+### Step 4. Deploy the dashboard to Streamlit Cloud
+
+1. https://share.streamlit.io → *New app*.
+2. Repo `psg0009/polymarket`, branch `claude/polymarket-trading-agent-Wo9yk`, **Main file path** `polyclaude/ui/dashboard.py`.
+3. *Advanced settings → Secrets* → paste:
+   ```toml
+   DATABASE_URL = "sqlite+libsql://polyclaude-<your-org>.turso.io/?authToken=..."
+   ```
+4. Deploy. You get a public URL like `https://polyclaude-psg0009.streamlit.app` that auto-redeploys on every push. The "Live status" tab shows the Brier ≤ 0.20, n ≥ 100 readiness gate.
+
+### Step 5. Going live (optional, after calibration is ready)
+
+Once the dashboard's "Live status" tab is green:
+
+1. Approve the three Polygon exchange contracts from your EOA — `polyclaude preflight` from any environment with the private key prints the exact calls. (You can do this from the Turso/Streamlit Cloud setup machine, or from a one-off GitHub Codespaces session — see below.)
+2. Edit `.github/workflows/agent-scan.yml` and replace
+   ```yaml
+   run: python -m polyclaude.main scan --limit 50
+   ```
+   with
+   ```yaml
+   run: python -m polyclaude.main trade --live --max-notional 25 --yes-i-am-sure
+   ```
+3. Commit & push. The next cron tick will place real orders within the daily cap.
+
+### Tip: GitHub Codespaces for one-off CLI work
+
+If you ever need a real shell (e.g. to run `polyclaude preflight`, inspect the ledger, or backtest interactively), open https://github.com/psg0009/polymarket → green *Code* button → *Codespaces* → *Create codespace on …*. You get a full VS Code in the browser with the repo cloned and all dependencies installable. Free tier covers 60h/month — plenty for occasional admin.
+
+---
+
 
 ## Ledger schema (chain of custody)
 

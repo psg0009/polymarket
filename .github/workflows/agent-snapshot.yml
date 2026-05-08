@@ -1,0 +1,25 @@
+name: agent-snapshot
+
+# Hourly: persist BookSnapshot rows so the backtester has fuel.
+
+on:
+  schedule:
+    - cron: "5 * * * *"   # every hour at :05
+  workflow_dispatch: {}
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Snapshot only (no-news, no-oracle)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ""    # empty → scan skips oracle and only writes snapshots+market rows
+        run: python -m polyclaude.main scan --limit 100 --no-news
